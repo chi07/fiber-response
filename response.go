@@ -67,7 +67,7 @@ func GetHttpCode(err error) int {
 			return http.StatusBadRequest
 		case apperror.ErrUnauthorized:
 			return http.StatusUnauthorized
-		case apperror.ErrPermissionDenied:
+		case apperror.ErrPermissionDenied, apperror.ErrNotActivated:
 			return http.StatusForbidden
 		case apperror.ErrRecordNotFound:
 			return http.StatusNotFound

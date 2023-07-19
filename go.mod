@@ -3,7 +3,7 @@ module github.com/chi07/fiber-response
 go 1.20
 
 require (
-	github.com/chi07/apperror v0.0.0-20230615160659-1f36bec0cb20
+	github.com/chi07/apperror v0.0.0-20230719102908-1d8a76d1e5dc
 	github.com/gofiber/fiber/v2 v2.46.0
 	github.com/stretchr/testify v1.8.4
 	github.com/valyala/fasthttp v1.47.0

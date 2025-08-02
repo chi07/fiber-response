@@ -18,13 +18,19 @@ type ErrorResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
-func Error(ctx *fiber.Ctx, err error, message string) error {
+func Error(ctx *fiber.Ctx, err error, message ...string) error {
 	httpCode := GetHttpCode(err)
+
+	msg := err.Error()
+	if len(message) > 0 && message[0] != "" {
+		msg = message[0]
+	}
+
 	ctx.Status(httpCode)
 	return ctx.JSON(&fiber.Map{
 		"error": &ErrorResponse{
 			Code:    httpCode,
-			Message: message,
+			Message: msg,
 		},
 	})
 }

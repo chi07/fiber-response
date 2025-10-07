@@ -1,6 +1,7 @@
 package response
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gofiber/fiber/v2"
@@ -63,8 +64,9 @@ func Success(ctx *fiber.Ctx, code int, data interface{}) error {
 }
 
 func GetHttpCode(err error) int {
-	if err, ok := err.(apperror.AppError); ok {
-		switch err.Code {
+	var appErr apperror.AppError
+	if errors.As(err, &appErr) {
+		switch appErr.Code {
 		case apperror.ErrInternalError:
 			return http.StatusInternalServerError
 		case apperror.ErrDuplicatedRecord:

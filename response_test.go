@@ -10,6 +10,7 @@ import (
 	"github.com/valyala/fasthttp"
 
 	"github.com/chi07/apperror"
+
 	response "github.com/chi07/fiber-response"
 )
 
@@ -95,7 +96,7 @@ func TestGetHttpCode(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		status := response.GetHttpCode(test.err)
+		status := response.GetHTTPStatus(test.err)
 		assert.Equal(t, test.expectedStatus, status)
 	}
 }

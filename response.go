@@ -16,7 +16,7 @@ type Response struct {
 type ErrorResponse struct {
 	Code     int      `json:"code"`
 	Message  string   `json:"message,omitempty"`
-	Messages []string `json:"messages,omitempty"` // dùng cho Errors()
+	Messages []string `json:"messages,omitempty"`
 }
 
 func Error(ctx *fiber.Ctx, err error, override ...string) error {

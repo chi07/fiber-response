@@ -7,25 +7,33 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/valyala/fasthttp"
 
-	"github.com/chi07/apperror"
+	"github.com/chi07/apperror/v2"
 
-	response "github.com/chi07/fiber-response"
+	response "github.com/chi07/fiber-response/v2"
 )
 
 type respEnvelope struct {
 	Error *struct {
 		Code     int      `json:"code"`
+		AppCode  string   `json:"appCode,omitempty"`
 		Message  string   `json:"message,omitempty"`
 		Messages []string `json:"messages,omitempty"`
 	} `json:"error,omitempty"`
 	Data any `json:"data,omitempty"`
 }
 
-func decodeBody(t *testing.T, ctx *fiber.Ctx) respEnvelope {
+func newCtx(t *testing.T) (fiber.Ctx, func()) {
+	t.Helper()
+	app := fiber.New()
+	ctx := app.AcquireCtx(&fasthttp.RequestCtx{})
+	return ctx, func() { app.ReleaseCtx(ctx) }
+}
+
+func decodeBody(t *testing.T, ctx fiber.Ctx) respEnvelope {
 	t.Helper()
 	var env respEnvelope
 	body := ctx.Response().Body()
@@ -39,9 +47,8 @@ func decodeBody(t *testing.T, ctx *fiber.Ctx) respEnvelope {
 }
 
 func TestError_WithOverrideMessage(t *testing.T) {
-	app := fiber.New()
-	ctx := app.AcquireCtx(&fasthttp.RequestCtx{})
-	defer app.ReleaseCtx(ctx)
+	ctx, release := newCtx(t)
+	defer release()
 
 	err := response.Error(ctx, errors.New("some error"), "test error")
 	assert.NoError(t, err)
@@ -54,12 +61,10 @@ func TestError_WithOverrideMessage(t *testing.T) {
 	}
 }
 
-func TestError_AppError_NoOverride_UsesAppMessageAndHttpCode(t *testing.T) {
-	app := fiber.New()
-	ctx := app.AcquireCtx(&fasthttp.RequestCtx{})
-	defer app.ReleaseCtx(ctx)
+func TestError_AppError_NoOverride(t *testing.T) {
+	ctx, release := newCtx(t)
+	defer release()
 
-	// AppError có HttpCode 409 & message tuỳ theo apperror
 	err := apperror.NewErrDuplicatedValue("email")
 	assert.NoError(t, response.Error(ctx, err))
 
@@ -68,15 +73,36 @@ func TestError_AppError_NoOverride_UsesAppMessageAndHttpCode(t *testing.T) {
 	env := decodeBody(t, ctx)
 	if assert.NotNil(t, env.Error) {
 		assert.Equal(t, http.StatusConflict, env.Error.Code)
+		assert.Equal(t, string(apperror.ErrDuplicatedRecord), env.Error.AppCode)
 		assert.True(t, strings.Contains(env.Error.Message, "email"), env.Error.Message)
 		assert.True(t, strings.Contains(env.Error.Message, "already used"), env.Error.Message)
 	}
 }
 
+func TestError_AppError_DoesNotLeakCause(t *testing.T) {
+	ctx, release := newCtx(t)
+	defer release()
+
+	err := apperror.NewErrInternalServer("processing", errors.New("db: connection refused"))
+	assert.NoError(t, response.Error(ctx, err))
+
+	env := decodeBody(t, ctx)
+	if assert.NotNil(t, env.Error) {
+		assert.NotContains(t, env.Error.Message, "db: connection refused")
+	}
+}
+
+func TestError_Nil(t *testing.T) {
+	ctx, release := newCtx(t)
+	defer release()
+
+	assert.NoError(t, response.Error(ctx, nil))
+	assert.Equal(t, http.StatusOK, ctx.Response().StatusCode())
+}
+
 func TestErrors_EmptySlice_Returns500(t *testing.T) {
-	app := fiber.New()
-	ctx := app.AcquireCtx(&fasthttp.RequestCtx{})
-	defer app.ReleaseCtx(ctx)
+	ctx, release := newCtx(t)
+	defer release()
 
 	err := response.Errors(ctx, nil)
 	assert.NoError(t, err)
@@ -90,15 +116,22 @@ func TestErrors_EmptySlice_Returns500(t *testing.T) {
 	}
 }
 
+func TestErrors_AllNil_Returns500(t *testing.T) {
+	ctx, release := newCtx(t)
+	defer release()
+
+	err := response.Errors(ctx, []error{nil, nil})
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusInternalServerError, ctx.Response().StatusCode())
+}
+
 func TestErrors_SingleDelegatesToError(t *testing.T) {
-	app := fiber.New()
-	ctx := app.AcquireCtx(&fasthttp.RequestCtx{})
-	defer app.ReleaseCtx(ctx)
+	ctx, release := newCtx(t)
+	defer release()
 
 	e := errors.New("only one")
 	err := response.Errors(ctx, []error{e})
 	assert.NoError(t, err)
-	// Errors() với single error sẽ gọi Error() → 500 by default với error thường
 	assert.Equal(t, http.StatusInternalServerError, ctx.Response().StatusCode())
 
 	env := decodeBody(t, ctx)
@@ -108,15 +141,14 @@ func TestErrors_SingleDelegatesToError(t *testing.T) {
 	}
 }
 
-func TestErrors_Multiple_ReturnsMessages400(t *testing.T) {
-	app := fiber.New()
-	ctx := app.AcquireCtx(&fasthttp.RequestCtx{})
-	defer app.ReleaseCtx(ctx)
+func TestErrors_Multiple_UsesFirstAppErrorStatus(t *testing.T) {
+	ctx, release := newCtx(t)
+	defer release()
 
 	errList := []error{
+		errors.New("plain"),
 		apperror.NewErrInvalidType("field"),
-		errors.New("plain 2"),
-		errors.New("plain 3"),
+		apperror.NewErrMissingField("name"),
 	}
 
 	err := response.Errors(ctx, errList)
@@ -126,17 +158,17 @@ func TestErrors_Multiple_ReturnsMessages400(t *testing.T) {
 	env := decodeBody(t, ctx)
 	if assert.NotNil(t, env.Error) {
 		assert.Equal(t, http.StatusBadRequest, env.Error.Code)
-		assert.Empty(t, env.Error.Message) // dùng messages thay vì message
+		assert.Equal(t, string(apperror.ErrInvalidFieldType), env.Error.AppCode)
+		assert.Empty(t, env.Error.Message)
 		if assert.Len(t, env.Error.Messages, 3) {
-			assert.True(t, strings.Contains(env.Error.Messages[0], "field"))
+			assert.True(t, strings.Contains(env.Error.Messages[1], "field"))
 		}
 	}
 }
 
 func TestSuccess_StatusAndBody(t *testing.T) {
-	app := fiber.New()
-	ctx := app.AcquireCtx(&fasthttp.RequestCtx{})
-	defer app.ReleaseCtx(ctx)
+	ctx, release := newCtx(t)
+	defer release()
 
 	payload := struct {
 		Message string `json:"message"`
@@ -148,7 +180,6 @@ func TestSuccess_StatusAndBody(t *testing.T) {
 
 	env := decodeBody(t, ctx)
 	if assert.Nil(t, env.Error) {
-		// Data là object có field message
 		m, ok := env.Data.(map[string]any)
 		if assert.True(t, ok) {
 			assert.Equal(t, "success", m["message"])
@@ -172,35 +203,15 @@ func TestGetHTTPStatus_Table(t *testing.T) {
 		{"Unauthorized", apperror.NewErrUnauthorized("token"), http.StatusUnauthorized},
 		{"ForbiddenPermission", apperror.NewErrStatusForbidden("no access"), http.StatusForbidden},
 		{"ForbiddenNotActivated", apperror.NewErrNotActivated("account"), http.StatusForbidden},
-		{"ForbiddenSuspended", apperror.NewErrSuspended("account"), http.StatusBadRequest /* or 403 if your mapCodeToStatus maps it so */},
+		{"Suspended", apperror.NewErrSuspended("account"), http.StatusBadRequest},
 		{"NotFound", apperror.NewErrRecordNotfound("id"), http.StatusNotFound},
+		{"CustomAppError", apperror.NewAppError(422, "C422", "custom"), 422},
 		{"PlainError", errors.New("some error"), http.StatusInternalServerError},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			status := response.GetHTTPStatus(tc.err)
-			assert.Equal(t, tc.expectedStatus, status)
+			assert.Equal(t, tc.expectedStatus, response.GetHTTPStatus(tc.err))
 		})
 	}
-}
-
-func TestGetHTTPStatus_AppError_NoHttpCode_MapFallback(t *testing.T) {
-	ae := &apperror.AppError{
-		Code:     apperror.ErrUnauthorized,
-		Message:  apperror.NewMessage("unauth"),
-		HTTPCode: 0,
-	}
-	status := response.GetHTTPStatus(ae)
-	assert.Equal(t, http.StatusUnauthorized, status)
-}
-
-func TestGetHTTPStatus_AppError_NoHttpCode_UnknownCode_Default500(t *testing.T) {
-	ae := &apperror.AppError{
-		Code:     apperror.Code("UNKNOWN_XYZ"),
-		Message:  apperror.NewMessage("unknown"),
-		HTTPCode: 0,
-	}
-	status := response.GetHTTPStatus(ae)
-	assert.Equal(t, http.StatusInternalServerError, status)
 }

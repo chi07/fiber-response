@@ -1,117 +1,109 @@
+// Package response provides a consistent JSON envelope for fiber v3
+// handlers: {data} on success and {error:{code,appCode,message|messages}}
+// on failure, with the HTTP status resolved from apperror codes.
 package response
 
 import (
 	"net/http"
 
-	"github.com/gofiber/fiber/v2"
-
-	"github.com/chi07/apperror"
+	"github.com/chi07/apperror/v2"
+	"github.com/gofiber/fiber/v3"
 )
 
+// Response is the standard JSON envelope.
 type Response struct {
 	Error *ErrorResponse `json:"error,omitempty"`
 	Data  any            `json:"data,omitempty"`
 }
 
+// ErrorResponse describes a failure. Code mirrors the HTTP status;
+// AppCode carries the stable application code (e.g. "V4004") when the
+// error is an *apperror.AppError.
 type ErrorResponse struct {
-	Code     int      `json:"code"`
-	Message  string   `json:"message,omitempty"`
-	Messages []string `json:"messages,omitempty"`
+	Code     int           `json:"code"`
+	AppCode  apperror.Code `json:"appCode,omitempty"`
+	Message  string        `json:"message,omitempty"`
+	Messages []string      `json:"messages,omitempty"`
 }
 
-func Error(ctx *fiber.Ctx, err error, override ...string) error {
-	status := GetHTTPStatus(err)
-
-	msg := err.Error()
-	if len(override) > 0 && override[0] != "" {
-		msg = override[0]
+// Error writes a single-error envelope. For *apperror.AppError the public
+// ae.Message is sent (the wrapped cause is never leaked to clients); other
+// errors fall back to err.Error() with status 500. A non-empty override
+// replaces the message.
+func Error(c fiber.Ctx, err error, override ...string) error {
+	if err == nil {
+		return Success(c, http.StatusOK, nil)
 	}
 
-	ctx.Status(status)
-	return ctx.JSON(Response{
-		Error: &ErrorResponse{
-			Code:    status,
-			Message: msg,
-		},
-	})
+	status := GetHTTPStatus(err)
+	resp := ErrorResponse{Code: status}
+
+	if ae, ok := apperror.AsAppError(err); ok {
+		resp.AppCode = ae.Code
+		resp.Message = string(ae.Message)
+	} else {
+		resp.Message = err.Error()
+	}
+	if len(override) > 0 && override[0] != "" {
+		resp.Message = override[0]
+	}
+
+	return c.Status(status).JSON(Response{Error: &resp})
 }
 
-func Errors(ctx *fiber.Ctx, errList []error) error {
-	if len(errList) == 0 {
-		ctx.Status(http.StatusInternalServerError)
-		return ctx.JSON(Response{
+// Errors writes a multi-error envelope. A single non-nil error delegates to
+// Error; the status is taken from the first *apperror.AppError found
+// (default 400). An empty (or all-nil) list produces a 500 envelope.
+func Errors(c fiber.Ctx, errList []error) error {
+	errs := make([]error, 0, len(errList))
+	for _, e := range errList {
+		if e != nil {
+			errs = append(errs, e)
+		}
+	}
+
+	switch len(errs) {
+	case 0:
+		return c.Status(http.StatusInternalServerError).JSON(Response{
 			Error: &ErrorResponse{
 				Code:    http.StatusInternalServerError,
 				Message: http.StatusText(http.StatusInternalServerError),
 			},
 		})
+	case 1:
+		return Error(c, errs[0])
 	}
 
-	if len(errList) == 1 {
-		return Error(ctx, errList[0])
-	}
-
-	msgs := make([]string, 0, len(errList))
-	for _, e := range errList {
-		if e == nil {
-			continue
+	status := http.StatusBadRequest
+	resp := ErrorResponse{Code: status, Messages: make([]string, 0, len(errs))}
+	for _, e := range errs {
+		if ae, ok := apperror.AsAppError(e); ok {
+			if resp.AppCode == "" && ae.HTTPCode != 0 {
+				resp.AppCode = ae.Code
+				status = ae.HTTPCode
+				resp.Code = status
+			}
+			resp.Messages = append(resp.Messages, string(ae.Message))
+		} else {
+			resp.Messages = append(resp.Messages, e.Error())
 		}
-		msgs = append(msgs, e.Error())
 	}
-
-	ctx.Status(http.StatusBadRequest)
-	return ctx.JSON(Response{
-		Error: &ErrorResponse{
-			Code:     http.StatusBadRequest,
-			Messages: msgs,
-		},
-	})
+	return c.Status(status).JSON(Response{Error: &resp})
 }
 
-func Success(ctx *fiber.Ctx, code int, data any) error {
-	ctx.Status(code)
-	return ctx.JSON(Response{
-		Data: data,
-	})
+// Success writes a data envelope with the given status.
+func Success(c fiber.Ctx, status int, data any) error {
+	return c.Status(status).JSON(Response{Data: data})
 }
 
+// GetHTTPStatus resolves the HTTP status for err: 200 for nil, the
+// AppError's own HTTPCode when present, otherwise 500.
 func GetHTTPStatus(err error) int {
 	if err == nil {
 		return http.StatusOK
 	}
-
-	if ae, ok := apperror.AsAppError(err); ok {
-		if ae.HTTPCode != 0 {
-			return ae.HTTPCode
-		}
-
-		if s := mapCodeToStatus(ae.Code); s != 0 {
-			return s
-		}
-		return http.StatusInternalServerError
+	if ae, ok := apperror.AsAppError(err); ok && ae.HTTPCode != 0 {
+		return ae.HTTPCode
 	}
-
 	return http.StatusInternalServerError
-}
-
-func mapCodeToStatus(code apperror.Code) int {
-	switch code {
-	case apperror.ErrInternalError:
-		return http.StatusInternalServerError
-	case apperror.ErrDuplicatedRecord:
-		return http.StatusConflict
-	case apperror.ErrInvalidFieldType,
-		apperror.ErrInvalidFieldValue,
-		apperror.ErrRequiredField,
-		apperror.ErrNotMatched:
-		return http.StatusBadRequest
-	case apperror.ErrUnauthorized:
-		return http.StatusUnauthorized
-	case apperror.ErrPermissionDenied, apperror.ErrNotActivated, apperror.ErrSuspended:
-		return http.StatusForbidden
-	case apperror.ErrRecordNotFound:
-		return http.StatusNotFound
-	default:
-		return 0
-	}
 }
